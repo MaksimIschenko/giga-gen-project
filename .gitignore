@@ -13,7 +13,10 @@ wheels/
 .env
 
 # Images
-images_out/
+output/
+
+# Logs
+logs/
 
 # MacOS
 .DS_Store

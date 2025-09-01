@@ -11,6 +11,7 @@ from gigachat import GigaChat
 from gigachat.models import Chat, Function, Messages, MessagesRole
 
 from src.configs.environment import get_environment_settings
+from src.configs.logging import get_logger
 from src.schemas.pydantic.model3d_generator import (
     Model3DGeneratorRequest,
     Model3DGeneratorResponse,
@@ -41,12 +42,14 @@ class Model3DGeneratorService:
     )
 
     def __init__(self) -> None:
+        self.logger = get_logger(__name__)
         self.environment_settings = get_environment_settings()
 
         # куда сохранять
         out_dir = getattr(self.environment_settings, "MODELS_OUT_DIR", None) or "models_out" # noqa
         self._models_dir = Path(out_dir)
         self._models_dir.mkdir(parents=True, exist_ok=True)
+        self.logger.info(f"Models directory set to: {self._models_dir}")
 
         # публичный базовый URL (для сборки ссылок)
         self._public_base_url: str | None = getattr(

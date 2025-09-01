@@ -12,6 +12,7 @@ from gigachat import GigaChat
 from gigachat.models import Chat, Messages, MessagesRole
 
 from src.configs.environment import get_environment_settings
+from src.configs.logging import get_logger
 from src.schemas.errors.simple_generator import SimpleGeneratorError
 from src.schemas.pydantic.simple_generator import (
     SimpleGeneratorRequest,
@@ -40,6 +41,7 @@ class SimpleGeneratorService:
     )
 
     def __init__(self) -> None:
+        self.logger = get_logger(__name__)
         self.environment_settings = get_environment_settings()
 
         self._images_dir = Path(
@@ -47,6 +49,7 @@ class SimpleGeneratorService:
             or "images_out"
         )
         self._images_dir.mkdir(parents=True, exist_ok=True)
+        self.logger.info(f"Images directory set to: {self._images_dir}")
 
         self._public_base_url: str | None = getattr(
             self.environment_settings, "PUBLIC_BASE_URL", None
@@ -57,6 +60,7 @@ class SimpleGeneratorService:
             scope=self.environment_settings.GIGACHAT_SCOPE,
             verify_ssl_certs=bool(self.environment_settings.GIGACHAT_VERIFY_SSL),
         )
+        self.logger.info("GigaChat client initialized successfully")
 
         # рабочие поля (устанавливаются в generate)
         self._current_mode: str = "icon"
@@ -72,6 +76,16 @@ class SimpleGeneratorService:
         self._current_mode = (getattr(req, "mode", "icon") or "icon").lower().strip()
         self._current_fewshot = bool(getattr(req, "fewshot", True))
 
+        self.logger.info(
+            "Starting image generation",
+            extra={
+                "mode": self._current_mode,
+                "fewshot": self._current_fewshot,
+                "prompt_length": len(req.prompt),
+                "filename_prefix": getattr(req, "filename_prefix", "gen"),
+            }
+        )
+
         file_path = await self._generate_image(
             prompt=req.prompt,
             style_system_prompt=getattr(req, "style", None), 
@@ -80,6 +94,15 @@ class SimpleGeneratorService:
             fewshot=self._current_fewshot,
         )
         image_url = self._to_public_url(file_path)
+        
+        self.logger.info(
+            "Image generation completed successfully",
+            extra={
+                "file_path": str(file_path),
+                "image_url": image_url,
+            }
+        )
+        
         return SimpleGeneratorResponse(image_url=image_url)
     
     
@@ -155,20 +178,31 @@ class SimpleGeneratorService:
 
         payload = Chat(messages=messages, function_call="auto")  # позволяем text2image
         try:
+            self.logger.debug("Sending request to GigaChat")
             resp = self._giga.chat(payload)
+            self.logger.debug("Received response from GigaChat")
         except Exception as e:
+            self.logger.error(f"GigaChat chat() failed: {e}", exc_info=True)
             raise SimpleGeneratorError(f"GigaChat chat() failed: {e}") from e
 
         html = (resp.choices[0].message.content or "").strip()
         file_id = self._extract_file_id_from_html(html)
         if not file_id:
+            self.logger.error(
+                f"Model did not return <img/> with file_id. Response: {html!r}"
+            ) 
             raise SimpleGeneratorError(
                 f"Модель не вернула <img/> с file_id. Ответ: {html!r}"
             )
 
+        self.logger.debug(f"Extracted file_id: {file_id}")
         try:
             image_obj = self._giga.get_image(file_id)  # содержит base64 контент
+            self.logger.debug("Successfully retrieved image from GigaChat")
         except Exception as e:
+            self.logger.error(
+                f"GigaChat get_image({file_id}) failed: {e}", exc_info=True
+            )
             raise SimpleGeneratorError(
                 f"GigaChat get_image({file_id}) failed: {e}"
             ) from e
@@ -178,9 +212,12 @@ class SimpleGeneratorService:
         filename = f"{safe_prefix}-{file_id}{extension}"
         file_path = out_root / filename
 
+        self.logger.debug(f"Saving image to: {file_path}")
         try:
             file_path.write_bytes(base64.b64decode(image_obj.content))
+            self.logger.debug(f"Image saved successfully to: {file_path}")
         except Exception as e:
+            self.logger.error(f"Failed to write file {file_path}: {e}", exc_info=True)
             raise SimpleGeneratorError(
                 f"Не удалось записать файл {file_path}: {e}"
             ) from e

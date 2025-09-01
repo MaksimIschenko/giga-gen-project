@@ -9,6 +9,7 @@ import anyio
 from fusionbrain_sdk_python import FBClient, PipelineType
 
 from src.configs.environment import get_environment_settings
+from src.configs.logging import get_logger
 from src.schemas.errors.kandinsky_generator import KandinskyGeneratorError
 from src.schemas.pydantic.kandinsky_generator import (
     KandinskyGeneratorRequest,
@@ -27,15 +28,19 @@ class KandinskyGeneratorService:
     """
 
     def __init__(self) -> None:
+        self.logger = get_logger(__name__)
         env = get_environment_settings()
         self._images_dir = Path(getattr(env, "IMAGES_OUT_DIR", "images_out"))
         self._images_dir.mkdir(parents=True, exist_ok=True)
+        self.logger.info(f"Images directory set to: {self._images_dir}")
+        
         self._public_base_url: str | None = getattr(env, "PUBLIC_BASE_URL", None)
 
         # FBClient читает ключи из .env (.ENV_*), но можно и явно передать:
         # self._client = FBClient(x_key=env.FB_API_KEY, x_secret=env.FB_API_SECRET)
         # Оставим автозагрузку из .env для совместимости с твоим проектом:
         self._client = FBClient()
+        self.logger.info("FusionBrain client initialized successfully")
 
     # ---------- Публичный API ----------
 

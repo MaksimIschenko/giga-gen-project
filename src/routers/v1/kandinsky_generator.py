@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, status
 from fastapi.exceptions import HTTPException
 
+from src.configs.logging import get_logger
 from src.schemas.pydantic.kandinsky_generator import (
     KandinskyGeneratorRequest,
     KandinskyGeneratorResponse,
@@ -16,6 +17,7 @@ from src.services.kandinsky_generator import (
 )
 
 KandinskyGeneratorRouter = APIRouter(prefix="/v1/kandinsky", tags=["kandinsky"])
+logger = get_logger(__name__)
 _service = KandinskyGeneratorService()
 
 
@@ -38,10 +40,32 @@ async def generate(request: KandinskyGeneratorRequest) -> KandinskyGeneratorResp
     """
     Генерация «сложных/красочных» изображений (Kandinsky/FusionBrain).
     """
+    logger.info(
+        "Kandinsky generator request received",
+        extra={
+            "prompt_length": len(request.prompt),
+            "style": getattr(request, "style", None),
+            "width": getattr(request, "width", None),
+            "height": getattr(request, "height", None),
+        }
+    )
+    
     try:
         result = await _service.generate(request)
+        logger.info(
+            "Kandinsky generator request completed successfully",
+            extra={"image_url": result.image_url}
+        )
         return result
     except Exception as exc:
-        print("Kandinsky generate failed: %s", exc)
+        logger.error(
+            "Kandinsky generate failed",
+            extra={
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+                "prompt_length": len(request.prompt),
+            },
+            exc_info=True
+        )
         code, payload = _map_exception(exc)
         raise HTTPException(status_code=code, detail=payload) from exc

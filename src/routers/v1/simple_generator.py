@@ -4,6 +4,7 @@ from typing import Any
 from fastapi import APIRouter, status
 from fastapi.exceptions import HTTPException
 
+from src.configs.logging import get_logger
 from src.schemas.errors.simple_generator import SimpleGeneratorError
 from src.schemas.pydantic.simple_generator import (
     SimpleGeneratorRequest,
@@ -15,6 +16,7 @@ SimpleGeneratorRouter = APIRouter(
     prefix="/v1/simple", tags=["simple"]
 )
 
+logger = get_logger(__name__)
 _service = SimpleGeneratorService()
 
 def _map_exception(exc: Exception) -> tuple[int, dict[str, Any]]:
@@ -56,12 +58,33 @@ async def generate(request: SimpleGeneratorRequest) -> SimpleGeneratorResponse:
     """
     Генерирует простое изображение (логотип, иконку) на основе запроса.
     """
+    logger.info(
+        "Simple generator request received",
+        extra={
+            "prompt_length": len(request.prompt),
+            "mode": getattr(request, "mode", "icon"),
+            "filename_prefix": getattr(request, "filename_prefix", "gen"),
+        }
+    )
+    
     try:
         result = await _service.generate(request)
+        logger.info(
+            "Simple generator request completed successfully",
+            extra={"image_url": result.image_url}
+        )
         return result
     except Exception as exc:
         # Логируем с контекстом запроса (без чувствительных данных)
-        print("SimpleGenerator generate failed: %s", exc)
+        logger.error(
+            "SimpleGenerator generate failed",
+            extra={
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+                "prompt_length": len(request.prompt),
+            },
+            exc_info=True
+        )
         http_code, payload = _map_exception(exc)
         raise HTTPException(status_code=http_code, detail=payload) from exc
     
