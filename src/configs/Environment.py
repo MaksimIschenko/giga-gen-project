@@ -13,7 +13,6 @@ def get_settings() -> str:
 class EnvironmentSettings(BaseSettings):
     # GIGA
     GIGACHAT_AUTH_KEY: str
-    GIGACHAT_BISINESS_AUTH_KEY: str
     GIGACHAT_CLIENT_SECRET: str
     GIGACHAT_CLIENT_ID: str
     GIGACHAT_SCOPE: str

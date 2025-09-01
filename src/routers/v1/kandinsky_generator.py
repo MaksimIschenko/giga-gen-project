@@ -54,7 +54,7 @@ async def generate(request: KandinskyGeneratorRequest) -> KandinskyGeneratorResp
         result = await _service.generate(request)
         logger.info(
             "Kandinsky generator request completed successfully",
-            extra={"image_url": result.image_url}
+            extra={"image_url": result.image_urls}
         )
         return result
     except Exception as exc:
