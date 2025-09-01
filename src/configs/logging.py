@@ -65,12 +65,6 @@ def setup_logging(
 def get_logger(name: str | None = None) -> logger:
     """
     Получить логгер для модуля.
-    
-    Args:
-        name: Имя модуля (обычно __name__)
-        
-    Returns:
-        Логгер loguru
     """
     if name:
         return logger.bind(name=name)
