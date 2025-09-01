@@ -1,17 +1,22 @@
 """ Router for Model3DGenerator """
 from __future__ import annotations
 
-import base64
+import asyncio
 import mimetypes
-import re
+import random
 from pathlib import Path
+from typing import Any
 
-from bs4 import BeautifulSoup
-from gigachat import GigaChat
-from gigachat.models import Chat, Function, Messages, MessagesRole
+import httpx
 
 from src.configs.environment import get_environment_settings
 from src.configs.logging import get_logger
+from src.configs.meshy import _MeshyConfig
+from src.schemas.errors.model3d_generator import (
+    Meshy3DError,
+    Meshy3DProviderUnavailableError,
+    Meshy3DTimeoutError,
+)
 from src.schemas.pydantic.model3d_generator import (
     Model3DGeneratorRequest,
     Model3DGeneratorResponse,
@@ -20,193 +25,279 @@ from src.schemas.pydantic.model3d_generator import (
 
 class Model3DGeneratorService:
     """
-    Генерация 3D-моделей (FBX) через GigaChat text2model3d.
-    - Строит системный промпт (lowpoly/realistic или вручную через style)
-    - Делает chat-completions c function_call="auto" и functions=[text2model3d]
-    - Извлекает <div data-model-id="..."/> из ответа
-    - Скачивает файл через SDK (base64) и сохраняет его
-    - Возвращает публичный URL файла
+    Пайплайн Meshy Text-to-3D:
+      preview 
+      -> wait SUCCEEDED 
+      -> refine (enable_pbr|texture_prompt) 
+      -> wait SUCCEEDED -> download
     """
 
-    LOWPOLY_SYSTEM_PROMPT = (
-        "Ты — 3D-художник для real-time. Генерируй низкополигональные модели, "
-        "оптимизированные для игр: <= 10k трис, аккуратный силуэт, один объект без анимаций, " # noqa
-        "PBR-материалы допускаются, UV-развёртка без перекрытий. Масштаб 1.0, ось Z вверх, " # noqa
-        "центр модели в (0,0,0). Без лишних подпорок и сцены, только целевой объект."
-    )
-
-    REALISTIC_SYSTEM_PROMPT = (
-        "Ты — 3D-художник PBR. Генерируй фотореалистичные модели с чистой топологией, "
-        "корректной UV-развёрткой, нейтральными материалами. Масштаб 1.0, ось Z вверх, " # noqa
-        "центр модели в (0,0,0). Только целевой объект, без окружения и анимаций."
-    )
-
     def __init__(self) -> None:
-        self.logger = get_logger(__name__)
-        self.environment_settings = get_environment_settings()
+        self.log = get_logger(__name__)
+        env = get_environment_settings()
 
-        # куда сохранять
-        out_dir = getattr(self.environment_settings, "MODELS_OUT_DIR", None) or "models_out" # noqa
+        api_key = getattr(env, "MESHY_API_KEY", None)
+        if not api_key:
+            raise Meshy3DError("Отсутствует MESHY_API_KEY в окружении.")
+
+        out_dir = getattr(env, "MODELS_OUT_DIR", None) or "output/models"
         self._models_dir = Path(out_dir)
         self._models_dir.mkdir(parents=True, exist_ok=True)
-        self.logger.info(f"Models directory set to: {self._models_dir}")
+        self.log.info(f"Models directory set to: {self._models_dir}")
 
-        # публичный базовый URL (для сборки ссылок)
-        self._public_base_url: str | None = getattr(
-            self.environment_settings, "PUBLIC_BASE_URL", None
+        self._public_base_url: str | None = getattr(env, "PUBLIC_BASE_URL", None)
+        self._cfg = _MeshyConfig(api_key=api_key)
+
+        self._client = httpx.AsyncClient(
+            base_url=self._cfg.base_url,
+            headers={"Authorization": f"Bearer {self._cfg.api_key}"},
+            timeout=httpx.Timeout(30.0, connect=30.0),
         )
 
-        # В 3D-доках рекомендуют увеличить timeout, т.к. генерация долгая
-        self._giga = GigaChat(
-            credentials=self.environment_settings.GIGACHAT_AUTH_KEY,
-            scope=getattr(self.environment_settings, "GIGACHAT_SCOPE", None),
-            verify_ssl_certs=bool(getattr(
-                self.environment_settings, 
-                "GIGACHAT_VERIFY_SSL", 
-                True)
-            ),
-            timeout=int(getattr(self.environment_settings, "GIGACHAT_TIMEOUT", 200)),
-        )
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
-        # рабочие поля
-        self._current_mode: str = "lowpoly"
-        self._current_fewshot: bool = True
-
-    # --------------- Публичный API ---------------
+    # -------- Публичный API --------
 
     async def generate(self, req: Model3DGeneratorRequest) -> Model3DGeneratorResponse:
-        """
-        Принимает Pydantic-запрос, возвращает Pydantic-ответ.
-        """
-        self._current_mode = (getattr(req, "mode", "lowpoly") or "lowpoly").lower().strip() # noqa
-        self._current_fewshot = bool(getattr(req, "fewshot", True))
+        prompt = req.prompt.strip()
+        if not prompt:
+            raise Meshy3DError("Пустой prompt.")
 
-        file_path = await self._generate_model(
-            prompt=req.prompt,
-            style_system_prompt=getattr(req, "style", None),
-            filename_prefix=getattr(req, "filename_prefix", "model"),
-            extension=getattr(req, "extension", ".fbx"),
-            fewshot=self._current_fewshot,
+        # профиль по mode
+        mode = (req.mode or "lowpoly").lower()
+        defaults = self._defaults_for_mode(mode)
+
+        art_style = req.art_style or defaults["art_style"]
+        topology = req.topology or defaults["topology"]
+        target_polycount = int(req.target_polycount or defaults["target_polycount"])
+        ai_model = req.ai_model
+        texture_prompt = req.texture_prompt
+
+        filename_prefix = req.filename_prefix or "model"
+        desired_ext = (req.extension or ".fbx").lower()
+        if not desired_ext.startswith("."):
+            desired_ext = "." + desired_ext
+
+        # preview
+        preview_id = await self._create_preview(
+            prompt=prompt,
+            art_style=art_style,
+            ai_model=ai_model,
+            topology=topology,
+            target_polycount=target_polycount,
+            should_remesh=True,
+            symmetry_mode="auto",
+            is_a_t_pose=False,
         )
-        model_url = self._to_public_url(file_path)
-        return Model3DGeneratorResponse(model_url=model_url)
-
-    # --------------- Внутренние методы ---------------
-
-    def _build_messages(
-        self,
-        user_prompt: str,
-        mode: str = "lowpoly",
-        override_system: str | None = None,
-        fewshot: bool = True,
-    ) -> list[Messages]:
-        """Собираем messages: system/user (+ опц. few-shot assistant)."""
-        system_content = override_system or (
-            self.REALISTIC_SYSTEM_PROMPT if mode == "realistic" else self.LOWPOLY_SYSTEM_PROMPT # noqa
+        await self._wait_succeeded(
+            preview_id, timeout_sec=self._cfg.preview_timeout_sec
         )
 
-        msgs = [Messages(role=MessagesRole.SYSTEM, content=system_content)]
+        # refine
+        enable_pbr = False if art_style == "sculpture" else True
+        refine_id = await self._create_refine(
+            preview_task_id=preview_id,
+            enable_pbr=enable_pbr,
+            texture_prompt=texture_prompt,
+        )
+        task_obj = await self._wait_succeeded(
+            refine_id, timeout_sec=self._cfg.refine_timeout_sec
+        )
 
-        if fewshot:
-            # короткий стабилизатор стиля
-            msgs.append(
-                Messages(
-                    role=MessagesRole.ASSISTANT,
-                    content="Готовлю чистую, корректно масштабированную 3D-модель целевого объекта.", # noqa
-                )
-            )
+        # download
+        model_url, picked_ext = self._pick_model_url(task_obj, desired_ext)
+        fpath = await self._download(model_url, filename_prefix, picked_ext)
 
-        msgs.append(Messages(role=MessagesRole.USER, content=user_prompt))
-        return msgs
+        return Model3DGeneratorResponse(model_url=self._to_public_url(fpath))
 
-    async def _generate_model(
+    # -------- Внутреннее --------
+
+    def _defaults_for_mode(self, mode: str) -> dict[str, Any]:
+        if mode == "realistic":
+            return {
+                "art_style": "realistic", 
+                "topology": "quad", 
+                "target_polycount": 30000
+            }
+        return {
+            "art_style": "realistic", 
+            "topology": "triangle", 
+            "target_polycount": 10000
+        }
+
+    # --- HTTP helpers с ретраями ---
+
+    async def _post(self, path: str, json: dict[str, Any]) -> httpx.Response:
+        tries = self._cfg.retry_tries
+        for i in range(tries):
+            r = await self._client.post(path, json=json)
+            if r.status_code in (429,) or r.status_code >= 500:
+                delay = min(self._cfg.retry_cap, self._cfg.retry_base * (2 ** i)) + random.uniform(0, 0.2) # noqa
+                await asyncio.sleep(delay)
+                continue
+            return r
+        return r  # последний ответ
+
+    async def _get(self, path: str) -> httpx.Response:
+        tries = self._cfg.retry_tries
+        for i in range(tries):
+            r = await self._client.get(path)
+            if r.status_code in (429,) or r.status_code >= 500:
+                delay = min(self._cfg.retry_cap, self._cfg.retry_base * (2 ** i)) + random.uniform(0, 0.2) # noqa
+                await asyncio.sleep(delay)
+                continue
+            return r
+        return r
+
+    # --- Meshy endpoints ---
+
+    async def _create_preview(
         self,
         *,
         prompt: str,
-        style_system_prompt: str | None = None,
-        out_dir: str | Path | None = None,
-        filename_prefix: str = "model",
-        extension: str = ".fbx",
-        fewshot: bool = True,
-    ) -> Path:
-        """Генерирует 3D-модель и сохраняет её. Возвращает абсолютный Path."""
-        if not prompt or not prompt.strip():
-            raise ValueError("Пустой prompt.")
-
-        # нормализуем расширение (рекомендуемый формат FBX согласно докам)
-        if not extension.startswith("."):
-            extension = "." + extension
-        # если расширение совсем экзотика — принудительно .fbx
-        if mimetypes.guess_type(f"file{extension}")[0] is None:
-            extension = ".fbx"
-
-        out_root = Path(out_dir) if out_dir else self._models_dir
-        out_root.mkdir(parents=True, exist_ok=True)
-
-        # сообщения
-        messages = self._build_messages(
-            user_prompt=prompt,
-            mode=getattr(self, "_current_mode", "lowpoly"),
-            override_system=style_system_prompt,
-            fewshot=fewshot,
-        )
-
-        # обязательно передаём встроенную функцию text2model3d
-        payload = Chat(
-            messages=messages,
-            function_call="auto",
-            functions=[Function(name="text2model3d")],
-        )
-
+        art_style: str,
+        ai_model: str,
+        topology: str,
+        target_polycount: int,
+        should_remesh: bool,
+        symmetry_mode: str,
+        is_a_t_pose: bool,
+    ) -> str:
+        payload = {
+            "mode": "preview",
+            "prompt": prompt,
+            "art_style": art_style,
+            "ai_model": ai_model,
+            "topology": topology,
+            "target_polycount": target_polycount,
+            "should_remesh": should_remesh,
+            "symmetry_mode": symmetry_mode,
+            "is_a_t_pose": is_a_t_pose,
+        }
         try:
-            resp = self._giga.chat(payload)
+            r = await self._post("/openapi/v2/text-to-3d", payload)
         except Exception as e:
-            raise RuntimeError(f"GigaChat chat() failed: {e}") from e
+            raise Meshy3DError(f"Сеть/preview: {e}") from e
 
-        html = (resp.choices[0].message.content or "").strip()
-        model_id = self._extract_model_id_from_html(html)
-        if not model_id:
-            raise RuntimeError(f"Модель не вернула <div data-model-id=.../>. Ответ: {html!r}") # noqa
+        if r.status_code == 401 or r.status_code == 403:
+            raise Meshy3DProviderUnavailableError(
+                "Unauthorized/Forbidden: проверьте MESHY_API_KEY."
+            ) 
+        if r.status_code != 200:
+            raise Meshy3DProviderUnavailableError(
+                f"Preview failed {r.status_code}: {r.text}"
+            )
 
-        # В доках указано, что get_image() подходит и для 3D (возвращает base64)
+        task_id = (r.json() or {}).get("result")
+        if not task_id:
+            raise Meshy3DError(f"Preview: пустой result: {r.text}")
+        return task_id
+
+    async def _create_refine(
+        self, 
+        *, 
+        preview_task_id: str, 
+        enable_pbr: bool, 
+        texture_prompt: str | None
+    ) -> str:
+        payload = {
+            "mode": "refine", 
+            "preview_task_id": preview_task_id, 
+            "enable_pbr": enable_pbr,
+        }
+        if texture_prompt:
+            payload["texture_prompt"] = texture_prompt
         try:
-            model_obj = self._giga.get_image(model_id)
+            r = await self._post("/openapi/v2/text-to-3d", payload)
         except Exception as e:
-            raise RuntimeError(f"GigaChat get_image({model_id}) failed: {e}") from e
+            raise Meshy3DError(f"Сеть/refine: {e}") from e
 
-        safe_prefix = self._slugify(filename_prefix) or "model"
-        filename = f"{safe_prefix}-{model_id}{extension}"
-        file_path = out_root / filename
+        if r.status_code == 401 or r.status_code == 403:
+            raise Meshy3DProviderUnavailableError(
+                "Unauthorized/Forbidden: проверьте MESHY_API_KEY."
+            )
+        if r.status_code != 200:
+            raise Meshy3DProviderUnavailableError(
+                f"Refine failed {r.status_code}: {r.text}"
+            )
 
+        task_id = (r.json() or {}).get("result")
+        if not task_id:
+            raise Meshy3DError(f"Refine: пустой result: {r.text}")
+        return task_id
+
+    async def _wait_succeeded(
+        self,
+        task_id: str, 
+        *, timeout_sec: int
+    ) -> dict[str, Any]:
+        start = asyncio.get_event_loop().time()
+        while True:
+            try:
+                r = await self._get(f"/openapi/v2/text-to-3d/{task_id}")
+            except Exception as e:
+                raise Meshy3DError(f"Сеть/status: {e}") from e
+
+            if r.status_code == 401 or r.status_code == 403:
+                raise Meshy3DProviderUnavailableError(
+                    "Unauthorized/Forbidden: проверьте MESHY_API_KEY."
+                )
+            if r.status_code != 200:
+                raise Meshy3DProviderUnavailableError(
+                    f"Status failed {r.status_code}: {r.text}"
+                )
+
+            obj = r.json() or {}
+            status = obj.get("status")
+            if status == "SUCCEEDED":
+                return obj
+            if status in {"FAILED", "CANCELED"}:
+                msg = (obj.get("task_error") or {}).get("message") or "Meshy task failed" # noqa
+                raise Meshy3DProviderUnavailableError(msg)
+
+            if asyncio.get_event_loop().time() - start > timeout_sec:
+                raise Meshy3DTimeoutError(f"Превышено время ожидания: {task_id}")
+
+            await asyncio.sleep(self._cfg.poll_interval_sec)
+
+    def _pick_model_url(
+        self, task_obj: dict[str, Any], desired_ext: str
+    ) -> tuple[str, str]:
+        model_urls = task_obj.get("model_urls") or {}
+        order = [desired_ext, ".fbx", ".glb", ".obj", ".usdz"]
+        keys = {".fbx": "fbx", ".glb": "glb", ".obj": "obj", ".usdz": "usdz"}
+        for ext in order:
+            key = keys.get(ext)
+            url = model_urls.get(key) if key else None
+            if url:
+                return url, ext
+        raise Meshy3DError("В ответе нет доступных model_urls (fbx/glb/obj/usdz).")
+
+    async def _download(self, url: str, prefix: str, ext: str) -> Path:
+        if not ext.startswith("."):
+            ext = "." + ext
+        if mimetypes.guess_type(f"x{ext}")[0] is None:
+            ext = ".fbx"
+        fpath = self._models_dir / f"{prefix}{ext}"
         try:
-            file_path.write_bytes(base64.b64decode(model_obj.content))
+            async with self._client.stream("GET", url) as resp:
+                if resp.status_code != 200:
+                    raise Meshy3DProviderUnavailableError(
+                        f"Download failed {resp.status_code}"
+                    )
+                with fpath.open("wb") as fd:
+                    async for chunk in resp.aiter_bytes():
+                        fd.write(chunk)
         except Exception as e:
-            raise RuntimeError(f"Не удалось записать файл {file_path}: {e}") from e
-
-        return file_path.resolve()
-
-    @staticmethod
-    def _extract_model_id_from_html(html: str) -> str | None:
-        """
-        Ожидаем тег: <div data-model-id="..."/>  (см. оф. доки)
-        """
-        soup = BeautifulSoup(html, "html.parser")
-        div = soup.find("div")
-        return div.get("data-model-id") if div and div.get("data-model-id") else None
+            raise Meshy3DError(f"Не удалось скачать модель: {e}") from e
+        return fpath.resolve()
 
     def _to_public_url(self, file_path: Path) -> str:
-        """PUBLIC_BASE_URL => https://.../<relpath>, иначе file:///abs/path"""
         if self._public_base_url:
             try:
                 rel = file_path.relative_to(Path.cwd())
             except ValueError:
                 rel = file_path.name
             return f"{self._public_base_url.rstrip('/')}/{rel.as_posix()}"
-        return file_path.resolve().as_uri()
-
-    @staticmethod
-    def _slugify(text: str) -> str:
-        text = text.strip().lower()
-        text = re.sub(r"[^\w\-\.]+", "-", text, flags=re.U)
-        text = re.sub(r"-{2,}", "-", text).strip("-")
-        return text
+        return file_path.as_uri()

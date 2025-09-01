@@ -1,4 +1,6 @@
-"""Pydantic schemas for 3D Model Generator"""
+""" Pydantic schemas for Model3DGenerator """
+from __future__ import annotations
+
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -6,36 +8,66 @@ from pydantic import BaseModel, Field
 
 class Model3DGeneratorRequest(BaseModel):
     """
-    - prompt — описание объекта (обяз.)
-    - mode — "lowpoly" или "realistic" (управляет системным промптом)
-    - fewshot — добавлять ли демонстрационный ответ ассистента
-    - style — опциональный override system-промпта
-    - filename_prefix — префикс имени файла
-    - extension — расширение файла модели (по умолчанию .fbx)
+    Запрос на генерацию 3D-модели через Meshy Text-to-3D.
     """
-    prompt: str = Field(..., description="Описание 3D-модели")
+    prompt: str = Field(..., description="Текстовое описание объекта")
     mode: Literal["lowpoly", "realistic"] = Field(
-        "lowpoly", 
-        description="Стиль генерации"
+        "lowpoly", description="Профиль для параметров топологии/полигонажа"
     )
-    fewshot: bool = Field(True, description="Добавлять ли few-shot подсказку")
-    style: str | None = Field(None, description="Полная замена system-промпта")
-    filename_prefix: str = Field("model", description="Префикс имени файла")
-    extension: str = Field(".fbx", description="Расширение файла модели")
+    # Дополнительно можно переопределить дефолты:
+    art_style: Literal["realistic", "sculpture"] | None = Field(
+        None, description="Стиль Meshy; если None — берётся из mode"
+    )
+    topology: Literal["triangle", "quad"] | None = Field(
+        None, description="Тип топологии; если None — берётся из mode"
+    )
+    target_polycount: int | None = Field(
+        None, ge=500, le=200000, description="Целевой полигонаж; если None — берётся из mode" # noqa
+    )
+    ai_model: Literal["meshy-5", "meshy-4"] = Field(
+        "meshy-5", description="Модель Meshy (по умолчанию meshy-5)"
+    )
+    texture_prompt: str | None = Field(
+        None, description="Подсказка для текстурирования (используется на refine)"
+    )
+
+    filename_prefix: str = Field(
+        "model", description="Префикс имени файла при сохранении"
+    )
+    extension: str = Field(
+        ".fbx", description="Желаемое расширение (.fbx|.glb|.obj|.usdz)"
+    )
 
     model_config = {
         "json_schema_extra": {
-            "example": {
-                "extension": ".fbx",
-                "fewshot": True,
-                "filename_prefix": "reward",
-                "mode": "lowpoly",
-                "prompt": "3D-модель кубка соревнований из золота."
-            }
+            "examples": [
+                {
+                    "prompt": "Низкополигональная модель деревянного стула без анимаций", # noqa
+                    "mode": "lowpoly",
+                    "filename_prefix": "chair_lp",
+                    "extension": ".fbx"
+                },
+                {
+                    "prompt": "Фотореалистичная модель глиняной вазы",
+                    "mode": "realistic",
+                    "art_style": "sculpture",
+                    "texture_prompt": "Матовая керамика с тонкой трещиноватой глазурью",
+                    "filename_prefix": "vase_rx",
+                    "extension": ".glb"
+                }
+            ]
         }
     }
 
 
 class Model3DGeneratorResponse(BaseModel):
-    """- model_url — URL сгенерированного файла 3D-модели (FBX)."""
-    model_url: str
+    """
+    Ответ: публичный URL на результат.
+    """
+    model_url: str = Field(..., description="URL скачивания файла модели")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {"model_url": "file:///.../output/models/chair_lp.fbx"}
+        }
+    }

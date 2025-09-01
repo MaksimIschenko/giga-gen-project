@@ -26,6 +26,9 @@ class EnvironmentSettings(BaseSettings):
     IMAGES_OUT_DIR: str
     MODELS_OUT_DIR: str
     
+    # MESHY
+    MESHY_API_KEY: str
+    
     class Config:
         env_file = get_settings()
         env_file_encoding = "utf-8"

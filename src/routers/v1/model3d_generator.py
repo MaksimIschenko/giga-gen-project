@@ -6,7 +6,12 @@ from fastapi import APIRouter, status
 from fastapi.exceptions import HTTPException
 
 from src.configs.logging import get_logger
-from src.schemas.errors.model3d_generator import Model3DGeneratorError
+from src.schemas.errors.model3d_generator import (
+    Meshy3DError,
+    Meshy3DProviderUnavailableError,
+    Meshy3DTimeoutError,
+    Model3DGeneratorError,
+)
 from src.schemas.pydantic.model3d_generator import (
     Model3DGeneratorRequest,
     Model3DGeneratorResponse,
@@ -51,21 +56,28 @@ async def generate(request: Model3DGeneratorRequest) -> Model3DGeneratorResponse
     )
     
     try:
-        result = await _service.generate(request)
-        logger.info(
-            "Model3D generator request completed successfully",
-            extra={"model_url": result.model_url}
-        )
-        return result
-    except Exception as exc:
-        logger.error(
-            "Model3DGenerator generate failed",
-            extra={
-                "error_type": type(exc).__name__,
-                "error_message": str(exc),
-                "prompt_length": len(request.prompt),
-            },
-            exc_info=True
-        )
-        code, payload = _map_exception(exc)
-        raise HTTPException(status_code=code, detail=payload) from exc
+        return await _service.generate(request)
+    except Meshy3DTimeoutError as e:
+        logger.exception("Meshy timeout: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT, 
+            detail={"code": "timeout", "message": str(e)}
+        ) from e
+    except Meshy3DProviderUnavailableError as e:
+        logger.exception("Meshy provider error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, 
+            detail={"code": "provider_error", "message": str(e)}
+        ) from e
+    except Meshy3DError as e:
+        logger.exception("Meshy error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail={"code": "bad_request", "message": str(e)}
+        ) from e
+    except Exception as e:
+        logger.exception("Internal error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail={"code": "internal_error", "message": "Внутренняя ошибка"}
+        ) from e
