@@ -1,7 +1,6 @@
 """ Router for Simple Generator """
 from typing import Any
 
-import anyio
 from fastapi import APIRouter, status
 from fastapi.exceptions import HTTPException
 
@@ -58,7 +57,7 @@ async def generate(request: SimpleGeneratorRequest) -> SimpleGeneratorResponse:
     Генерирует простое изображение (логотип, иконку) на основе запроса.
     """
     try:
-        result = await anyio.to_thread.run_sync(_service.generate, request)
+        result = await _service.generate(request)
         return result
     except Exception as exc:
         # Логируем с контекстом запроса (без чувствительных данных)

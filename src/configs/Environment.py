@@ -25,6 +25,7 @@ class EnvironmentSettings(BaseSettings):
     
     # PATHS
     IMAGES_OUT_DIR: str
+    MODELS_OUT_DIR: str
     
     class Config:
         env_file = get_settings()
