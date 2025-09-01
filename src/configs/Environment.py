@@ -1,9 +1,12 @@
-from functools import lru_cache
-from pydantic_settings import BaseSettings
+""" Environment settings """
 import os
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings
+
 
 @lru_cache
-def get_settings():
+def get_settings() -> str:
     runtime_env = os.getenv("ENV")
     return f".env.{runtime_env}" if runtime_env else ".env"
 
@@ -28,5 +31,10 @@ class EnvironmentSettings(BaseSettings):
         env_file_encoding = "utf-8"
         
 @lru_cache
-def get_environment_settings():
+def get_environment_settings() -> EnvironmentSettings:
+    """Возвращает EnvironmentSettings
+
+    :return: EnvironmentSettings
+    :rtype: EnvironmentSettings
+    """
     return EnvironmentSettings()

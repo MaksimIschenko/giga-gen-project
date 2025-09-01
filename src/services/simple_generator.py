@@ -1,23 +1,22 @@
-# src/services/simple_generator_service.py
+""" Сервис «простых» изображений (логотипы, простая графика) через GigaChat. """
+
 from __future__ import annotations
 
 import base64
 import mimetypes
 import re
 from pathlib import Path
-from typing import Optional
 
 from bs4 import BeautifulSoup
 from gigachat import GigaChat
 from gigachat.models import Chat, Messages, MessagesRole
 
-from src.schemas.pydantic.SimpleGeneratorSchema import (
+from src.configs.environment import get_environment_settings
+from src.schemas.errors.simple_generator import SimpleGeneratorError
+from src.schemas.pydantic.simple_generator import (
     SimpleGeneratorRequest,
     SimpleGeneratorResponse,
 )
-from src.configs.Environment import get_environment_settings
-from src.schemas.errors.SimpleGeneratorErrors import SimpleGeneratorError
-
 
 
 class SimpleGeneratorService:
@@ -30,23 +29,26 @@ class SimpleGeneratorService:
     """
 
     ICON_SYSTEM_PROMPT = (
-        "Ты — дизайнер пиктограмм. Всегда создавай простые монохромные или двухцветные иконки "
-        "на белом фоне, без теней и градиентов, плоский векторный стиль, высокая контрастность, "
+        "Ты — дизайнер пиктограмм. Всегда создавай простые монохромные или двухцветные иконки " # noqa
+        "на белом фоне, без теней и градиентов, плоский векторный стиль, высокая контрастность, " # noqa
         "одна ключевая форма, толстые чёткие линии. Без текста и водяных знаков."
     )
     LOGO_SYSTEM_PROMPT = (
-        "Ты — дизайнер логотипов в минималистичном стиле. Создавай лаконичные знаки на белом фоне, "
-        "без теней/градиентов/фото, 1–2 цвета, плоская геометрия, чистые контуры, читабельность в малом размере. "
+        "Ты — дизайнер логотипов в минималистичном стиле. Создавай лаконичные знаки на белом фоне, " # noqa
+        "без теней/градиентов/фото, 1–2 цвета, плоская геометрия, чистые контуры, читабельность в малом размере. " # noqa
         "Без текста, если не указан явно."
     )
 
     def __init__(self) -> None:
         self.environment_settings = get_environment_settings()
 
-        self._images_dir = Path(self.environment_settings.IMAGES_OUT_DIR or "images_out")
+        self._images_dir = Path(
+            self.environment_settings.IMAGES_OUT_DIR 
+            or "images_out"
+        )
         self._images_dir.mkdir(parents=True, exist_ok=True)
 
-        self._public_base_url: Optional[str] = getattr(
+        self._public_base_url: str | None = getattr(
             self.environment_settings, "PUBLIC_BASE_URL", None
         )
 
@@ -72,7 +74,7 @@ class SimpleGeneratorService:
 
         file_path = await self._generate_image(
             prompt=req.prompt,
-            style_system_prompt=getattr(req, "style", None),          # опциональная «ручная» подмена system-промпта
+            style_system_prompt=getattr(req, "style", None), 
             filename_prefix=getattr(req, "filename_prefix", "gen"),
             extension=getattr(req, "extension", ".jpg"),
             fewshot=self._current_fewshot,
@@ -87,11 +89,12 @@ class SimpleGeneratorService:
         self,
         user_prompt: str,
         mode: str = "icon",
-        override_system: Optional[str] = None,
+        override_system: str | None = None,
         fewshot: bool = True,
-    ):
+    ) -> list[Messages]:
         """
-        Собираем массив messages с ролями system/user (+необязательный few-shot assistant).
+        Собираем массив messages с ролями system/user 
+        (+необязательный few-shot assistant).
         """
         system_content = override_system or (
             self.LOGO_SYSTEM_PROMPT if mode == "logo" else self.ICON_SYSTEM_PROMPT
@@ -107,7 +110,8 @@ class SimpleGeneratorService:
                 Messages(
                     role=MessagesRole.ASSISTANT,
                     content=(
-                        "Готовлю плоскую, контрастную, безградиентную иконку на белом фоне "
+                        "Готовлю плоскую, контрастную, "
+                        "безградиентную иконку на белом фоне "
                         "с одной доминантной формой."
                     ),
                 )
@@ -119,7 +123,7 @@ class SimpleGeneratorService:
     async def _generate_image(
         self,
         prompt: str,
-        style_system_prompt: Optional[str] = None,
+        style_system_prompt: str | None = None,
         out_dir: str | Path | None = None,
         filename_prefix: str = "gen",
         extension: str = ".jpg",
@@ -158,12 +162,16 @@ class SimpleGeneratorService:
         html = (resp.choices[0].message.content or "").strip()
         file_id = self._extract_file_id_from_html(html)
         if not file_id:
-            raise SimpleGeneratorError(f"Модель не вернула <img/> с file_id. Ответ: {html!r}")
+            raise SimpleGeneratorError(
+                f"Модель не вернула <img/> с file_id. Ответ: {html!r}"
+            )
 
         try:
             image_obj = self._giga.get_image(file_id)  # содержит base64 контент
         except Exception as e:
-            raise SimpleGeneratorError(f"GigaChat get_image({file_id}) failed: {e}") from e
+            raise SimpleGeneratorError(
+                f"GigaChat get_image({file_id}) failed: {e}"
+            ) from e
 
         # безопасное имя файла
         safe_prefix = self._slugify(filename_prefix) or "gen"
@@ -173,12 +181,14 @@ class SimpleGeneratorService:
         try:
             file_path.write_bytes(base64.b64decode(image_obj.content))
         except Exception as e:
-            raise SimpleGeneratorError(f"Не удалось записать файл {file_path}: {e}") from e
+            raise SimpleGeneratorError(
+                f"Не удалось записать файл {file_path}: {e}"
+            ) from e
 
         return file_path.resolve()
 
     @staticmethod
-    def _extract_file_id_from_html(html: str) -> Optional[str]:
+    def _extract_file_id_from_html(html: str) -> str | None:
         """
         Ищет <img src="..."> и возвращает значение src (file_id).
         """

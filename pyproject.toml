@@ -15,3 +15,55 @@ dependencies = [
     "fusionbrain-sdk-python>=0",
     "pydantic-settings>=2.0.0",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.12.11",
+]
+
+[tool.ruff]
+# Ограничение длины строки (как у Black)
+line-length = 88
+# Целевая версия Python
+target-version = "py312"
+
+# Автофикс при запуске `ruff check --fix`
+fix = true
+
+# Игнорируем служебные папки
+exclude = [
+    ".git",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+]
+
+[tool.ruff.format]
+# тут можно управлять стилем кавычек, отступов и пр.
+# форматер включается автоматически, отдельного поля "format" нет
+quote-style = "double"       # "single" или "double"
+indent-style = "space"       # "space" или "tab"
+skip-magic-trailing-comma = false
+line-ending = "lf"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort (импорт)
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "N",   # pep8-naming
+    "ANN", # аннотации типов
+]
+
+ignore = [
+    "ANN101",  # не требовать аннотацию self
+    "ANN102",  # не требовать аннотацию cls
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+combine-as-imports = true
+force-single-line = false
